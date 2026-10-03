@@ -14,6 +14,7 @@ import yfinance as yf
 import json
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 
 def load_env(path):
@@ -30,8 +31,16 @@ def load_env(path):
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
+class TursoConnectionError(RuntimeError):
+    """Safe connection diagnostics without disclosing credentials or response bodies."""
+
+
 class Turso:
     def __init__(self, url, token):
+        url = str(url).strip().strip("\"'").strip()
+        token = str(token).strip().strip("\"'").strip()
+        if token.lower().startswith('bearer '):
+            token = token[7:].strip()
         for prefix in ("libsql://", "turso://"):
             if url.startswith(prefix):
                 url = "https://" + url[len(prefix):]
@@ -66,8 +75,21 @@ class Turso:
             "Authorization": "Bearer " + self.token,
             "Content-Type": "application/json",
         }, method="POST")
-        with urlopen(request, timeout=60) as response:
-            data = json.load(response)
+        try:
+            with urlopen(request, timeout=60) as response:
+                data = json.load(response)
+        except HTTPError as error:
+            hints = {
+                400: '요청이 거부되었습니다. Turso DB 주소와 HTTP API 지원 여부를 확인하세요.',
+                401: '인증 실패입니다. 이 DB용으로 발급된 유효한 데이터베이스 토큰을 Secrets의 TURSO_AUTH_TOKEN에 설정하세요. 만료·폐기 여부도 확인하세요.',
+                403: '접근이 거부되었습니다. 토큰의 DB 조회 권한과 대상 DB를 확인하세요.',
+                404: 'DB 또는 API 주소를 찾지 못했습니다. TURSO_DATABASE_URL이 해당 DB의 정확한 접속 주소인지 확인하세요.',
+                429: '요청 한도를 초과했습니다. 잠시 후 재시도하고 Turso 사용량을 확인하세요.',
+            }
+            hint = hints.get(error.code, 'Turso 서비스 상태와 DB 접속 설정을 확인하세요.')
+            raise TursoConnectionError(f'Turso HTTP {error.code}: {hint}') from None
+        except URLError:
+            raise TursoConnectionError('Turso 네트워크 연결 실패: DB 호스트 주소와 네트워크 연결을 확인하세요.') from None
         results = data.get("results", [])
         if len(results) != 2:
             raise RuntimeError("Turso 응답 형식이 올바르지 않습니다.")
@@ -297,6 +319,9 @@ def main():
             st.error('TURSO_DATABASE_URL / TURSO_AUTH_TOKEN을 Secrets 또는 환경변수에 설정하세요.')
             return
         company_data = companies(url, token)
+    except TursoConnectionError as error:
+        st.error(f'종목 분류 조회 실패: {error}')
+        return
     except Exception as error:
         st.error(f'종목 분류 조회 실패 ({type(error).__name__}). russell3000 테이블과 DB 연결을 확인하세요.')
         return
@@ -344,6 +369,9 @@ def main():
                                             calculated - prices_done, len(frame))
                 st.session_state['active_filters'] = filters
                 st.session_state['screen_revision'] = st.session_state.get('screen_revision', 0) + 1
+        except TursoConnectionError as error:
+            st.error(f'데이터 조회 실패: {error}')
+            return
         except Exception as error:
             st.error(f'데이터 조회 실패 ({type(error).__name__}). DB 설정과 네트워크 연결을 확인하세요.')
             return
