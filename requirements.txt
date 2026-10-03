@@ -1,0 +1,4 @@
+yfinance>=0.2.65,<1.0
+streamlit>=1.52,<2.0
+pandas>=2.2,<3.0
+plotly>=5.22,<7.0
