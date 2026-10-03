@@ -111,7 +111,7 @@ def credentials():
 
 
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
-def statements(url, _token, industries=(), sectors=()):
+def statements(url, _token, industries=(), sectors=(), watchlist=False):
     conditions, args = [], []
     for column, selected in [('industry', industries), ('sector', sectors)]:
         if selected:
@@ -119,6 +119,8 @@ def statements(url, _token, industries=(), sectors=()):
             args.extend(selected)
     where = (' WHERE Ticker IN (SELECT ticker FROM russell3000 WHERE '
              + ' AND '.join(conditions) + ')') if conditions else ''
+    if watchlist:
+        where += (' AND ' if where else ' WHERE ') + 'Ticker IN (SELECT ticker FROM watchlist)'
     # Transfer only columns consumed by the screener; preserve all required periods.
     fields = ('Ticker, Date, Period, OperatingIncome, EBIT, NetWorkingCapital, '
               'NetPPE, EV, EPS, ROE, TotalDebt, Cash, MarketCap, Price, Currency')
@@ -268,7 +270,9 @@ def build_results(frame, market, company_data=None):
 def filter_results(result, filters):
     result = result.copy()
     for name, value in filters.items():
-        if name in {'Industry', 'Sector'}:
+        if name == 'Watchlist':
+            continue  # Applied by SQL before fetching financials and Yahoo prices.
+        elif name in {'Industry', 'Sector'}:
             if value:
                 result = result[result[name].isin(value)]
         elif name == 'Total Rank':
@@ -338,6 +342,9 @@ def main():
                     st.caption(f'russell3000에 저장된 {name} 분류가 없습니다.')
                 if selected:
                     filters[name] = selected
+            filters['Watchlist'] = st.checkbox(
+                'Watchlist만 조회', value=False,
+                help='Turso watchlist 테이블의 ticker만 조회합니다. Industry / Sector와 함께 선택하면 교집합으로 조회합니다.')
             for name, default in [('Total Rank', 100), ('EPS 증가율(Y)', 10.0), ('ROE(Y)', 10.0), ('ROE(Q)', 3.0)]:
                 enabled = st.checkbox(f'{name} 적용', value=False)
                 value = (st.number_input('Total Rank 상위 개수', min_value=1, value=default, step=1)
@@ -355,11 +362,11 @@ def main():
                 start = perf_counter()
                 industries = tuple(sorted(filters.get('Industry', [])))
                 sectors = tuple(sorted(filters.get('Sector', [])))
-                frame = statements(url, token, industries, sectors)
+                frame = statements(url, token, industries, sectors, filters['Watchlist'])
                 db_done = perf_counter()
                 if frame.empty:
                     st.session_state.pop('screen', None)
-                    st.info('financial_statements에 데이터가 없습니다.')
+                    st.info('선택한 Watchlist / Industry / Sector 범위에 재무 데이터가 없습니다.')
                     return
                 market = quotes(tuple(sorted(frame['Ticker'].unique())))
                 prices_done = perf_counter()
@@ -389,7 +396,7 @@ def main():
         st.markdown('''- ROC = 영업이익(없으면 EBIT) / (비현금 운전자본 + NetPPE). 분기는 최근 4분기 합계입니다.
 - EY = 같은 영업이익 / EV. 당기 Q는 Yahoo 현재가 × 현재 주식 수 + DB 총부채 − DB 현금입니다. 주식 수 조회 실패 시 DB MarketCap / Price를 사용합니다.
 - 과거 Q 및 Y의 EY는 해당 DB EV를 사용합니다. ROC는 주가와 무관합니다.
-- Industry / Sector를 먼저 DB 조회에 적용하고 해당 종목의 현재가만 가져옵니다. Total Rank는 선택 범위 안에서 ROC(Q), EY(Q) 순위를 더해 매깁니다. 분류 미선택 시 전체 범위입니다. EPS / ROE / Rank 조건은 순위 계산 후 적용합니다.
+- Watchlist / Industry / Sector를 먼저 DB 조회에 적용하고 해당 종목의 현재가만 가져옵니다. Watchlist 선택 시 watchlist 테이블의 ticker만 포함하며 분류 조건과 교집합을 사용합니다. Total Rank는 선택 범위 안에서 ROC(Q), EY(Q) 순위를 더해 매깁니다. 범위 조건 미선택 시 전체입니다. EPS / ROE / Rank 조건은 순위 계산 후 적용합니다.
 - EPS 증가율은 전년 동기 대비입니다. 연간 조건은 최근 3년 모두 입력값 초과입니다. 전년 EPS가 0 이하이거나 데이터가 없으면 미산출합니다.
 - ROE는 DB 비율 × 100이며 분기 ROE는 연율화하지 않습니다. 모든 비율은 %로 표시합니다.
 - 재무 데이터는 15분, 현재가는 5분 캐시합니다. 현재가는 Yahoo 최근 거래가격이며 지연될 수 있습니다. 캐시 초기화 후 조회 버튼을 누르면 다시 가져옵니다.
