@@ -11,7 +11,71 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-from russell import Turso, load_env
+import json
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+
+
+def load_env(path):
+    """Read simple KEY=VALUE settings without overriding existing environment."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            raise ValueError(".env에는 KEY=VALUE 형식으로 설정해야 합니다.")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+class Turso:
+    def __init__(self, url, token):
+        for prefix in ("libsql://", "turso://"):
+            if url.startswith(prefix):
+                url = "https://" + url[len(prefix):]
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in ("", "/")):
+            raise ValueError("TURSO_DATABASE_URL에 libsql:// 또는 https:// DB 기본 주소를 설정하세요.")
+        if not token.strip():
+            raise ValueError("TURSO_AUTH_TOKEN이 비어 있습니다.")
+        self.endpoint = url.rstrip("/") + "/v2/pipeline"
+        self.token = token
+
+    def execute(self, sql, args=()):
+        def encode(value):
+            if value is None:
+                return {"type": "null"}
+            if isinstance(value, int):
+                return {"type": "integer", "value": str(value)}
+            if isinstance(value, float):
+                return {"type": "float", "value": value}
+            return {"type": "text", "value": str(value)}
+
+        payload = {"requests": [
+            {"type": "execute", "stmt": {
+                "sql": sql,
+                "args": [encode(value) for value in args],
+            }},
+            {"type": "close"},
+        ]}
+        request = Request(self.endpoint, data=json.dumps(payload).encode("utf-8"), headers={
+            "Authorization": "Bearer " + self.token,
+            "Content-Type": "application/json",
+        }, method="POST")
+        with urlopen(request, timeout=60) as response:
+            data = json.load(response)
+        results = data.get("results", [])
+        if len(results) != 2:
+            raise RuntimeError("Turso 응답 형식이 올바르지 않습니다.")
+        for result in results:
+            if result.get("type") != "ok":
+                error = result.get("error", {})
+                raise RuntimeError("Turso SQL 오류: " + str(error.get("message", "알 수 없는 오류")))
+        return results[0]["response"]["result"]
 
 
 def credentials():
